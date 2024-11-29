@@ -210,14 +210,8 @@ class DefensiveReflexAgent(ReflexCaptureAgent):
             # Find the distance to the closest invader
             dists = [self.get_maze_distance(my_pos, a.get_position()) for a in invaders]
             closest_invader_distance = min(dists)
-            nearest_invader_pos = [
-                a.get_position() for a in invaders 
-                if self.get_maze_distance(my_pos, a.get_position()) == closest_invader_distance
-            ][0]
 
             features['invader_distance'] = closest_invader_distance
-            successor_distance = self.get_maze_distance(my_pos, nearest_invader_pos)
-            features['distance_to_nearest_invader'] = successor_distance
 
         # Penalize stopping or reversing direction
         if action == Directions.STOP: 
@@ -232,8 +226,7 @@ class DefensiveReflexAgent(ReflexCaptureAgent):
         return {
             'num_invaders': -1000,
             'on_defense': 100,
-            'invader_distance': -500,
-            'distance_to_nearest_invader': -1000,
+            'invader_distance': -1000,
             'stop': -200, 
             'reverse': -50
         }
