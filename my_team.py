@@ -26,14 +26,15 @@ import util
 from capture_agents import CaptureAgent
 from game import Directions
 from util import nearest_point
-
-
+from util import PriorityQueue
+from util import manhattan_distance
+from util import Counter
 #################
 # Team creation #
 #################
 
 def create_team(first_index, second_index, is_red,
-                first='OffensiveReflexAgent', second='DefensiveReflexAgent', num_training=0):
+                first='OffensiveReflexAgent', second='DefensiveAStarAgent', num_training=0):
     """
     This function should return a list of two agents that will form the
     team, initialized using firstIndex and secondIndex as their agent
@@ -230,3 +231,221 @@ class DefensiveReflexAgent(ReflexCaptureAgent):
             'stop': -200, 
             'reverse': -50
         }
+        
+        
+class OptimizedDefensiveAgent(ReflexCaptureAgent):
+    """
+    Un agente defensivo optimizado que protege comida y minimiza la presencia de invasores.
+    """
+
+    def __init__(self, index, time_for_computing=0.1):
+        super().__init__(index, time_for_computing)
+        self.previous_food = None  # Para rastrear comida desaparecida
+
+    def get_features(self, game_state, action):
+        features = util.Counter()
+        successor = self.get_successor(game_state, action)
+
+        my_state = successor.get_agent_state(self.index)
+        my_pos = my_state.get_position()
+
+        # Identificar si el agente está en defensa o ataque
+        features['on_defense'] = 1 if not my_state.is_pacman else 0
+
+        # Detectar enemigos visibles
+        enemies = [successor.get_agent_state(i) for i in self.get_opponents(successor)]
+        visible_invaders = [e for e in enemies if e.is_pacman and e.get_position() is not None]
+
+        # Número de invasores detectados
+        features['num_invaders'] = len(visible_invaders)
+
+        if len(visible_invaders) > 0:
+            # Calcular distancia al invasor más cercano
+            invader_distances = [self.get_maze_distance(my_pos, inv.get_position()) for inv in visible_invaders]
+            features['invader_distance'] = min(invader_distances)
+
+        # Detectar comida desaparecida
+        food_defending = self.get_food_you_are_defending(game_state).as_list()
+        if self.previous_food:
+            missing_food = [food for food in self.previous_food if food not in food_defending]
+        else:
+            missing_food = []
+        self.previous_food = food_defending  # Actualizar estado previo de comida
+
+        # Priorizar comida desaparecida si existe
+        if len(missing_food) > 0:
+            food_distances = [self.get_maze_distance(my_pos, food) for food in missing_food]
+            features['missing_food_distance'] = min(food_distances)
+        else:
+            features['missing_food_distance'] = 0
+
+        # Calcular distancia al límite (patrulla cuando no hay objetivos claros)
+        boundary_positions = self.get_boundary_pos(successor)
+        boundary_distances = [self.get_maze_distance(my_pos, pos) for pos in boundary_positions]
+        features['boundary_distance'] = min(boundary_distances)
+
+        # Penalizar quedarse quieto o moverse en reversa
+        if action == Directions.STOP:
+            features['stop'] = 1
+        reverse = Directions.REVERSE[game_state.get_agent_state(self.index).configuration.direction]
+        if action == reverse:
+            features['reverse'] = 1
+
+        return features
+
+    def get_weights(self, game_state, action):
+        """
+        Ajusta los pesos de cada característica.
+        """
+        return {
+            'num_invaders': -1000,             # Prioridad para minimizar invasores
+            'invader_distance': -500,         # Atrapar invasores cercanos
+            'on_defense': 100,                # Mantenerse en defensa
+            'missing_food_distance': -300,    # Proteger comida desaparecida
+            'boundary_distance': -10,         # Patrullar la frontera
+            'stop': -100,                     # Penalizar quedarse quieto
+            'reverse': -50                    # Penalizar movimientos reversos
+        }
+
+class DefensiveAStarAgent(ReflexCaptureAgent):
+    """
+    Un agente defensivo que protege comida, patrulla la frontera y persigue invasores
+    utilizando A* para planificación eficiente.
+    """
+
+    def __init__(self, index, time_for_computing=0.1):
+        super().__init__(index, time_for_computing)
+        self.previous_food = None  # Rastrea comida protegida desaparecida
+        self.target = None  # Objetivo actual del agente
+
+    def register_initial_state(self, game_state):
+        """
+        Inicializa el estado del agente y registra la comida inicial.
+        """
+        super().register_initial_state(game_state)
+        self.previous_food = self.get_food_you_are_defending(game_state).as_list()
+        self.target = None
+
+    def choose_action(self, game_state):
+        """
+        Decide la mejor acción basándose en prioridades defensivas y utiliza A* si es necesario.
+        """
+        actions = game_state.get_legal_actions(self.index)
+        my_pos = game_state.get_agent_state(self.index).get_position()
+
+        # Actualizar comida protegida
+        current_food = self.get_food_you_are_defending(game_state).as_list()
+        missing_food = [food for food in self.previous_food if food not in current_food]
+        self.previous_food = current_food
+
+        # Detectar invasores visibles
+        enemies = [game_state.get_agent_state(i) for i in self.get_opponents(game_state)]
+        visible_invaders = [e for e in enemies if e.is_pacman and e.get_position() is not None]
+
+        # Prioridades:
+        # 1. Perseguir invasores visibles
+        if visible_invaders:
+            invader_positions = [inv.get_position() for inv in visible_invaders]
+            self.target = min(invader_positions, key=lambda pos: self.get_maze_distance(my_pos, pos))
+
+        # 2. Ir a la comida desaparecida
+        elif missing_food:
+            self.target = missing_food[0]
+
+        # 3. Patrullar la frontera
+        elif not self.target:
+            boundary_positions = self.get_boundary_pos(game_state)
+            self.target = random.choice(boundary_positions)
+
+        # Usar A* para calcular la ruta hacia el objetivo
+        if self.target:
+            path = self.a_star(game_state, self.target)
+            if path:
+                return path[0]  # Siguiente acción en la ruta
+
+        # Si no hay objetivos claros, utiliza la evaluación
+        values = [self.evaluate(game_state, action) for action in actions]
+        max_value = max(values)
+        best_actions = [a for a, v in zip(actions, values) if v == max_value]
+        return random.choice(best_actions)
+
+    def a_star(self, game_state, target):
+        """
+        Implementa el algoritmo A* para calcular la ruta más corta al objetivo.
+        """
+        frontier = PriorityQueue()
+        start_pos = game_state.get_agent_state(self.index).get_position()
+        frontier.push((start_pos, []), 0)
+        explored = set()
+
+        while not frontier.is_empty():
+            current_pos, path = frontier.pop()
+
+            if current_pos in explored:
+                continue
+            explored.add(current_pos)
+
+            if current_pos == target:
+                return path
+
+            for action in game_state.get_legal_actions(self.index):
+                successor = self.get_successor(game_state, action)
+                successor_pos = successor.get_agent_state(self.index).get_position()
+                if successor_pos not in explored:
+                    cost = len(path) + 1
+                    priority = cost + manhattan_distance(successor_pos, target)
+                    frontier.push((successor_pos, path + [action]), priority)
+
+        return []
+
+    def get_features(self, game_state, action):
+        """
+        Calcula características relevantes para la defensa.
+        """
+        features = Counter()
+        successor = self.get_successor(game_state, action)
+        my_pos = successor.get_agent_state(self.index).get_position()
+
+        # Característica: número de invasores visibles
+        enemies = [successor.get_agent_state(i) for i in self.get_opponents(successor)]
+        visible_invaders = [e for e in enemies if e.is_pacman and e.get_position() is not None]
+        features['num_invaders'] = len(visible_invaders)
+
+        if visible_invaders:
+            invader_distances = [self.get_maze_distance(my_pos, inv.get_position()) for inv in visible_invaders]
+            features['invader_distance'] = min(invader_distances)
+
+        # Característica: comida desaparecida
+        if self.previous_food:
+            food_defending = self.get_food_you_are_defending(game_state).as_list()
+            missing_food = [food for food in self.previous_food if food not in food_defending]
+            if missing_food:
+                food_distances = [self.get_maze_distance(my_pos, food) for food in missing_food]
+                features['missing_food_distance'] = min(food_distances)
+
+        # Característica: distancia al objetivo actual
+        if self.target:
+            features['target_distance'] = self.get_maze_distance(my_pos, self.target)
+
+        # Penalizar quedarse quieto o moverse en reversa
+        if action == Directions.STOP:
+            features['stop'] = 1
+        reverse = Directions.REVERSE[game_state.get_agent_state(self.index).configuration.direction]
+        if action == reverse:
+            features['reverse'] = 1
+
+        return features
+
+    def get_weights(self, game_state, action):
+        """
+        Define los pesos asociados a las características.
+        """
+        return {
+            'num_invaders': -1000,             # Prioridad máxima para invasores
+            'invader_distance': -500,         # Aproximarse a invasores
+            'missing_food_distance': -300,    # Proteger comida desaparecida
+            'target_distance': -100,          # Moverse hacia el objetivo
+            'stop': -200,                     # Penalizar quedarse quieto
+            'reverse': -50                    # Penalizar movimientos reversos
+        }
+
