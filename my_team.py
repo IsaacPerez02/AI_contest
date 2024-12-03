@@ -75,10 +75,7 @@ class ReflexCaptureAgent(CaptureAgent):
         """
         actions = game_state.get_legal_actions(self.index)
 
-        # You can profile your evaluation time by uncommenting these lines
-        # start = time.time()
         values = [self.evaluate(game_state, a) for a in actions]
-        # print 'eval time for agent %d: %.4f' % (self.index, time.time() - start)
 
         max_value = max(values)
         best_actions = [a for a, v in zip(actions, values) if v == max_value]
@@ -140,56 +137,98 @@ class OffensiveReflexAgent(ReflexCaptureAgent):
     but it is by no means the best or only way to build an offensive agent.
     """
 
+    def choose_action(self, game_state):
+        """
+        Picks among the actions with the highest Q(s,a).
+        """
+
+        # Get all legal actions for the agent
+        actions = game_state.get_legal_actions(self.index)
+
+        # Evaluate each action based on the resulting successor state
+        values = [self.evaluate(game_state, a) for a in actions]
+
+        # Find the highest evaluation score
+        max_value = max(values)
+
+        # Select actions with the highest score
+        best_actions = [a for a, v in zip(actions, values) if v == max_value]
+
+        # Randomly choose one of the best actions
+        return random.choice(best_actions)
+
     def get_features(self, game_state, action):
+        # Initialize feature counter
         features = util.Counter()
+        # Get the successor game state after the action
         successor = self.get_successor(game_state, action)
+        # List of food dots available to eat
         food_list = self.get_food(successor).as_list()
+        # Number of food items the agent is carrying
         food_eaten = successor.get_agent_state(self.index).num_carrying
+        # List of food dots that the team is defending
         food_list_defense = self.get_food_you_are_defending(successor).as_list()
+        # Feature for the score based on remaining food
         features['successor_score'] = -len(food_list)
+        # Current position of the agent
         my_pos = successor.get_agent_state(self.index).get_position()
+        # Boundary positions to return home
         boundary_pos = self.get_boundary_pos(successor)
+        # Minimum distance to the closest boundary position
         min_boundary_distance = min([self.get_maze_distance(my_pos, boundary) for boundary in boundary_pos])
+        # Get information about opponent agents
         enemies = [successor.get_agent_state(i) for i in self.get_opponents(successor)]
+        # Identify visible opponent ghosts
         ghosts = [a for a in enemies if not a.is_pacman and a.get_position() is not None]
-    
-        if len(food_list) > 1:  # This should always be True,  but better safe than sorry
+
+        # # Handle food distance and carrying risk features
+        if len(food_list) > 1:  # Ensure there is food to target
+            # Minimum distance to the nearest food dot
             min_distance = min([self.get_maze_distance(my_pos, food) for food in food_list])
             features['distance_to_food'] = min_distance
+
+            # Add a risk factor when carrying food based on how much is carried
             if food_eaten > 4:
                 features['high_carrying_risk'] = min_boundary_distance
             elif food_eaten > 1:
                 features['distance_to_home'] = min_boundary_distance
         else:
+            # Assign high risk if food is minimal but needs to return
             features['high_carrying_risk'] = min_boundary_distance
 
+        # # Handle ghost proximity and avoidance
         if len(ghosts) > 0:
+            # Distances to visible ghosts
             dists = [self.get_maze_distance(my_pos, ght.get_position()) for ght in ghosts]
             features['ghosts_distance'] = min(dists)
 
-            if (min(dists) <= 2):
+            # Run away if a ghost is too close
+            if min(dists) <= 2:
                 features['run_away'] = 1
                 features['high_carrying_risk'] = 2 * min_boundary_distance
-            elif (min(dists) <= 5):
+            elif min(dists) <= 5:
                 features['high_carrying_risk'] = min_boundary_distance
 
+            # Handle scared ghosts
             scared_timers = [ght.scared_timer for ght in ghosts if ght.scared_timer > 0]
             total = 0
             for scd in scared_timers:
                 total += scd
 
-            if total > 0:
-                features['ghosts_distance'] = - min(dists)
+            if total > 0:  # If ghosts are scared, reverse ghost distance logic
+                features['ghosts_distance'] = -min(dists)
 
-                if (min(dists) <= 2):
-                    features['run_away'] = - 1
+                if min(dists) <= 2:  # Close scared ghost means less risk
+                    features['run_away'] = -1
 
-
-        if action == Directions.STOP: features['stop'] = 1 
+        # # Penalize stopping
+        if action == Directions.STOP:
+            features['stop'] = 1
 
         return features
 
     def get_weights(self, game_state, action):
+        # Assign weights to each feature for the evaluation function
         return {'successor_score': 1000, 'distance_to_food': -10, 'run_away': 100, 'high_carrying_risk': -50, 'distance_to_home': -1, 'eat_capsule': 10000, 'ghosts_distance': 10, 'stop': -10}
 
 class DefensiveAStarAgent(ReflexCaptureAgent):
